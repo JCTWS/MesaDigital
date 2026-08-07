@@ -25,6 +25,8 @@ import {
   Search,
   RefreshCw,
 } from "lucide-react";
+import { supabase } from "../supabaseClient.js";
+import { getDeviceId } from "../lib/device.js";
 
 const STORAGE_KEY = "sacramento-ficha-v4";
 const OLD_KEYS = ["sacramento-ficha-v3", "sacramento-ficha-v2", "sacramento-ficha"];
@@ -903,19 +905,30 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
 
   useEffect(() => {
     (async () => {
+      // (1) abre rápido com a cópia local do navegador, se existir
       try {
-        const res = await window.storage.get(STORAGE_KEY, false);
-        if (res && res.value) {
-          setCharacter({ ...defaultCharacter(), ...JSON.parse(res.value) });
+        const local = localStorage.getItem(STORAGE_KEY);
+        if (local) setCharacter({ ...defaultCharacter(), ...JSON.parse(local) });
+      } catch (e) {}
+
+      // (2) busca a versão "oficial" no Supabase (pode ser mais nova,
+      //    vinda de outro dispositivo) e substitui se existir
+      try {
+        const deviceId = getDeviceId();
+        const { data, error } = await supabase.from("fichas").select("dados").eq("device_id", deviceId).maybeSingle();
+        if (!error && data?.dados) {
+          setCharacter({ ...defaultCharacter(), ...data.dados });
           setLoading(false);
           return;
         }
       } catch (e) {}
+
+      // (3) nada no Supabase ainda: tenta migrar de chaves antigas locais
       for (const key of OLD_KEYS) {
         try {
-          const old = await window.storage.get(key, false);
-          if (old && old.value) {
-            const o = JSON.parse(old.value);
+          const old = localStorage.getItem(key);
+          if (old) {
+            const o = JSON.parse(old);
             setCharacter({
               ...defaultCharacter(),
               nome: o.nome || "", arquetipo: o.arquetipo || "", portrait: o.portrait || null,
@@ -941,8 +954,12 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
     setSaveState("saving");
     const t = setTimeout(async () => {
       try {
-        const result = await window.storage.set(STORAGE_KEY, JSON.stringify(character), false);
-        setSaveState(result ? "saved" : "error");
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(character));
+        const deviceId = getDeviceId();
+        const { error } = await supabase
+          .from("fichas")
+          .upsert({ device_id: deviceId, dados: character, updated_at: new Date().toISOString() }, { onConflict: "device_id" });
+        setSaveState(error ? "error" : "saved");
       } catch (e) { setSaveState("error"); }
     }, 700);
     return () => clearTimeout(t);
@@ -985,7 +1002,10 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
     if (!window.confirm("Isso apaga a ficha salva e começa uma nova. Continuar?")) return;
     const fresh = defaultCharacter();
     setCharacter(fresh);
-    try { await window.storage.set(STORAGE_KEY, JSON.stringify(fresh), false); } catch (e) {}
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+      await supabase.from("fichas").upsert({ device_id: getDeviceId(), dados: fresh, updated_at: new Date().toISOString() }, { onConflict: "device_id" });
+    } catch (e) {}
   };
 
   if (loading) {
