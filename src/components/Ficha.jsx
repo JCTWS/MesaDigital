@@ -24,9 +24,9 @@ import {
   Store,
   Search,
   RefreshCw,
+  Users,
 } from "lucide-react";
 import { supabase } from "../supabaseClient.js";
-import { getDeviceId } from "../lib/device.js";
 
 const STORAGE_KEY = "sacramento-ficha-v4";
 const OLD_KEYS = ["sacramento-ficha-v3", "sacramento-ficha-v2", "sacramento-ficha"];
@@ -895,7 +895,115 @@ function Loja({ dinheiro, onComprar }) {
   );
 }
 
+const CURRENT_FICHA_KEY = "sacramento-ficha-atual-id";
+
 export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
+  const [fichaId, setFichaId] = useState(() => {
+    try { return localStorage.getItem(CURRENT_FICHA_KEY) || null; } catch (e) { return null; }
+  });
+
+  const escolherFicha = (id) => {
+    setFichaId(id);
+    try {
+      if (id) localStorage.setItem(CURRENT_FICHA_KEY, id);
+      else localStorage.removeItem(CURRENT_FICHA_KEY);
+    } catch (e) {}
+  };
+
+  if (!fichaId) {
+    return <SeletorDeFichas onEscolher={escolherFicha} />;
+  }
+
+  return (
+    <FichaEditor
+      key={fichaId}
+      fichaId={fichaId}
+      onTrocarFicha={() => escolherFicha(null)}
+      mesaLink={mesaLink}
+      onVidaSnapshot={onVidaSnapshot}
+    />
+  );
+}
+
+function SeletorDeFichas({ onEscolher }) {
+  const [fichas, setFichas] = useState([]);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState("");
+  const [criando, setCriando] = useState(false);
+
+  const carregar = async () => {
+    setCarregando(true);
+    setErro("");
+    try {
+      const { data, error } = await supabase.from("fichas").select("id, dados, updated_at").order("updated_at", { ascending: false });
+      if (error) throw error;
+      setFichas(data || []);
+    } catch (e) {
+      setErro(e.message || "erro ao carregar fichas");
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  useEffect(() => { carregar(); }, []);
+
+  const criarFicha = async () => {
+    setCriando(true);
+    try {
+      const fresh = defaultCharacter();
+      const { data, error } = await supabase.from("fichas").insert({ dados: fresh }).select("id").single();
+      if (error) throw error;
+      onEscolher(data.id);
+    } catch (e) {
+      setErro(e.message || "erro ao criar ficha");
+    } finally {
+      setCriando(false);
+    }
+  };
+
+  const apagarFicha = async (id, e) => {
+    e.stopPropagation();
+    if (!window.confirm("Apagar essa ficha pra sempre? Não dá pra desfazer.")) return;
+    try {
+      await supabase.from("fichas").delete().eq("id", id);
+      setFichas((prev) => prev.filter((f) => f.id !== id));
+    } catch (e) {}
+  };
+
+  return (
+    <div className="ficha-seletor-root">
+      <style>{globalStyles}</style>
+      <div className="ficha-seletor-card">
+        <div className="ficha-seletor-title">FICHAS DE SACRAMENTO</div>
+        <p className="ficha-seletor-hint">
+          Todas as fichas já criadas ficam listadas aqui pra qualquer um abrir e editar — não são presas a um
+          dispositivo. Escolha uma pra continuar, ou crie uma nova.
+        </p>
+        {erro && <p className="entry-error">{erro}</p>}
+        {carregando ? (
+          <div className="ficha-seletor-loading"><Loader2 size={18} className="spin" /> carregando fichas...</div>
+        ) : (
+          <div className="ficha-seletor-lista">
+            {fichas.length === 0 && <p className="ficha-seletor-vazio">nenhuma ficha criada ainda</p>}
+            {fichas.map((f) => (
+              <button key={f.id} className="ficha-seletor-item" onClick={() => onEscolher(f.id)}>
+                <span className="ficha-seletor-nome">{f.dados?.nome?.trim() || "(sem nome)"}</span>
+                <span className="ficha-seletor-sub">{f.dados?.arquetipo || ""}</span>
+                <span className="icon-btn ficha-seletor-apagar" onClick={(e) => apagarFicha(f.id, e)}><Trash2 size={14} /></span>
+              </button>
+            ))}
+          </div>
+        )}
+        <button className="roll-btn" onClick={criarFicha} disabled={criando}>
+          <Plus size={14} /> {criando ? "criando..." : "criar ficha nova"}
+        </button>
+        <button className="reset-btn" style={{ marginTop: 8 }} onClick={carregar}><RefreshCw size={13} /> atualizar lista</button>
+      </div>
+    </div>
+  );
+}
+
+function FichaEditor({ fichaId, onTrocarFicha, mesaLink, onVidaSnapshot }) {
   const [character, setCharacter] = useState(defaultCharacter());
   const [activeTab, setActiveTab] = useState("pontos");
   const [loading, setLoading] = useState(true);
@@ -904,18 +1012,20 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
   const firstLoad = useRef(true);
 
   useEffect(() => {
+    setLoading(true);
+    firstLoad.current = true;
     (async () => {
       // (1) abre rápido com a cópia local do navegador, se existir
+      const localKey = `${STORAGE_KEY}:${fichaId}`;
       try {
-        const local = localStorage.getItem(STORAGE_KEY);
+        const local = localStorage.getItem(localKey);
         if (local) setCharacter({ ...defaultCharacter(), ...JSON.parse(local) });
       } catch (e) {}
 
-      // (2) busca a versão "oficial" no Supabase (pode ser mais nova,
-      //    vinda de outro dispositivo) e substitui se existir
+      // (2) busca a versão "oficial" no Supabase (pode ter sido editada
+      //    por outra pessoa) e substitui se existir
       try {
-        const deviceId = getDeviceId();
-        const { data, error } = await supabase.from("fichas").select("dados").eq("device_id", deviceId).maybeSingle();
+        const { data, error } = await supabase.from("fichas").select("dados").eq("id", fichaId).maybeSingle();
         if (!error && data?.dados) {
           setCharacter({ ...defaultCharacter(), ...data.dados });
           setLoading(false);
@@ -923,7 +1033,8 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
         }
       } catch (e) {}
 
-      // (3) nada no Supabase ainda: tenta migrar de chaves antigas locais
+      // (3) nada no Supabase ainda pra esse id: tenta migrar de chaves
+      //    antigas locais (só faz sentido na primeira vez que essa ficha existe)
       for (const key of OLD_KEYS) {
         try {
           const old = localStorage.getItem(key);
@@ -946,7 +1057,7 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
       }
       setLoading(false);
     })();
-  }, []);
+  }, [fichaId]);
 
   useEffect(() => {
     if (loading) return;
@@ -954,11 +1065,10 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
     setSaveState("saving");
     const t = setTimeout(async () => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(character));
-        const deviceId = getDeviceId();
+        localStorage.setItem(`${STORAGE_KEY}:${fichaId}`, JSON.stringify(character));
         const { error } = await supabase
           .from("fichas")
-          .upsert({ device_id: deviceId, dados: character, updated_at: new Date().toISOString() }, { onConflict: "device_id" });
+          .upsert({ id: fichaId, dados: character, updated_at: new Date().toISOString() }, { onConflict: "id" });
         setSaveState(error ? "error" : "saved");
       } catch (e) { setSaveState("error"); }
     }, 700);
@@ -999,12 +1109,12 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
   };
 
   const resetFicha = async () => {
-    if (!window.confirm("Isso apaga a ficha salva e começa uma nova. Continuar?")) return;
+    if (!window.confirm("Isso apaga o conteúdo desta ficha (pra todo mundo que a estiver usando) e começa em branco. Continuar?")) return;
     const fresh = defaultCharacter();
     setCharacter(fresh);
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-      await supabase.from("fichas").upsert({ device_id: getDeviceId(), dados: fresh, updated_at: new Date().toISOString() }, { onConflict: "device_id" });
+      localStorage.setItem(`${STORAGE_KEY}:${fichaId}`, JSON.stringify(fresh));
+      await supabase.from("fichas").upsert({ id: fichaId, dados: fresh, updated_at: new Date().toISOString() }, { onConflict: "id" });
     } catch (e) {}
   };
 
@@ -1081,7 +1191,8 @@ export default function FichaSacramento({ mesaLink, onVidaSnapshot } = {}) {
               {saveState === "saved" && <Save size={12} />}
               {saveState === "saving" ? "salvando" : saveState === "saved" ? "salvo" : saveState === "error" ? "erro ao salvar" : ""}
             </span>
-            <button className="reset-btn" onClick={resetFicha}><RotateCcw size={13} /> nova ficha</button>
+            <button className="reset-btn" onClick={resetFicha}><RotateCcw size={13} /> limpar ficha</button>
+            <button className="reset-btn" onClick={onTrocarFicha}><Users size={13} /> trocar de ficha</button>
           </div>
         </nav>
 
@@ -1443,6 +1554,19 @@ const globalStyles = `
 } */
 :root { --parchment:#e8dcb8; --parchment-deep:#d6c494; --ink:#2a1d14; --leather:#5c3a21; --leather-dark:#3d2615; --rust:#9c4221; --brass:#a6812e; --green:#4f6a3d; }
 .loading-screen { display:flex; align-items:center; justify-content:center; gap:10px; min-height:240px; font-family:'Vollkorn',serif; color:var(--leather-dark); background:var(--parchment); }
+.ficha-seletor-root { display:flex; justify-content:center; padding:24px 12px; }
+.ficha-seletor-card { width:100%; max-width:420px; background:var(--parchment); border:1px solid var(--leather-dark); border-radius:6px; padding:20px; box-shadow:0 10px 30px rgba(0,0,0,0.35); font-family:'Vollkorn',serif; color:var(--ink); }
+.ficha-seletor-title { font-family:'TheWildBunch','Rye',serif; font-size:19px; color:var(--leather-dark); text-align:center; letter-spacing:1px; margin-bottom:6px; }
+.ficha-seletor-hint { font-size:11.5px; color:var(--leather); line-height:1.5; margin:0 0 12px; }
+.ficha-seletor-loading { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--leather); padding:10px 0; }
+.ficha-seletor-lista { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; max-height:340px; overflow-y:auto; }
+.ficha-seletor-vazio { font-size:11.5px; color:var(--leather); font-style:italic; }
+.ficha-seletor-item { display:flex; align-items:center; gap:8px; background:rgba(255,252,240,0.5); border:1px solid var(--parchment-deep); border-radius:4px; padding:8px 10px; cursor:pointer; text-align:left; font-family:'Vollkorn',serif; }
+.ficha-seletor-item:hover { border-color:var(--brass); }
+.ficha-seletor-nome { flex:1; font-size:13px; font-weight:600; }
+.ficha-seletor-sub { font-size:10.5px; color:var(--leather); }
+.ficha-seletor-apagar { color:var(--leather); }
+.ficha-seletor-apagar:hover { color:var(--rust); }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 .sacramento-root { font-family:'Vollkorn',serif; color:var(--ink); background:var(--leather-dark); padding:18px; border-radius:6px; }
 .ledger { display:flex; min-height:560px; background:var(--parchment); border-radius:4px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.45); border:1px solid var(--leather-dark); }
